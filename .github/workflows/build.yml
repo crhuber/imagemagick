@@ -74,14 +74,23 @@ jobs:
 
       - name: Bundle libraries with dylibbundler
         run: |
-          # Run dylibbundler multiple times to catch all nested dependencies
-          dylibbundler -od -of -b \
+          # Create libs directory
+          mkdir -p ./Magick.app/Contents/libs/
+
+          # Run dylibbundler with create mode to actually copy files
+          dylibbundler -od -of -cd -b \
             -x ./Magick.app/Contents/MacOS/magick \
             -d ./Magick.app/Contents/libs/ \
             -p @executable_path/../libs/
 
-          # Run again to catch any missed dependencies
-          dylibbundler -od -of -b \
+          # Run again to catch any nested dependencies
+          dylibbundler -od -of -cd -b \
+            -x ./Magick.app/Contents/MacOS/magick \
+            -d ./Magick.app/Contents/libs/ \
+            -p @executable_path/../libs/
+
+          # Third pass to be absolutely sure
+          dylibbundler -od -of -cd -b \
             -x ./Magick.app/Contents/MacOS/magick \
             -d ./Magick.app/Contents/libs/ \
             -p @executable_path/../libs/

@@ -17,6 +17,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Homebrew
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+          eval "$(/opt/homebrew/bin/brew shellenv)"
+
       - name: Install Homebrew dependencies
         run: |
           brew install cmake jpeg dylibbundler webp openexr little-cms2 pkg-config glib fontconfig ghostscript freetype gettext libzip libraqm libheif jbigkit pango libraw libwmf djvulibre pango librsvg
@@ -77,23 +83,48 @@ jobs:
           # Create libs directory
           mkdir -p ./Magick.app/Contents/libs/
 
+          echo "Running dylibbundler (pass 1)..."
           # Run dylibbundler with create mode to actually copy files
           dylibbundler -od -of -cd -b \
             -x ./Magick.app/Contents/MacOS/magick \
             -d ./Magick.app/Contents/libs/ \
-            -p @executable_path/../libs/
+            -p @executable_path/../libs/ || echo "First pass had warnings"
 
+          echo "Running dylibbundler (pass 2)..."
           # Run again to catch any nested dependencies
           dylibbundler -od -of -cd -b \
             -x ./Magick.app/Contents/MacOS/magick \
             -d ./Magick.app/Contents/libs/ \
-            -p @executable_path/../libs/
+            -p @executable_path/../libs/ || echo "Second pass had warnings"
 
+          echo "Running dylibbundler (pass 3)..."
           # Third pass to be absolutely sure
           dylibbundler -od -of -cd -b \
             -x ./Magick.app/Contents/MacOS/magick \
             -d ./Magick.app/Contents/libs/ \
-            -p @executable_path/../libs/
+            -p @executable_path/../libs/ || echo "Third pass had warnings"
+
+          # Check if any files were actually copied
+          echo "Checking libs directory..."
+          if [ ! -d "./Magick.app/Contents/libs/" ]; then
+            echo "ERROR: libs directory does not exist!"
+            exit 1
+          fi
+
+          DYLIB_COUNT=$(find ./Magick.app/Contents/libs/ -name "*.dylib" 2>/dev/null | wc -l)
+          echo "Found $DYLIB_COUNT dylib files"
+
+          if [ "$DYLIB_COUNT" -eq 0 ]; then
+            echo "ERROR: dylibbundler did not copy any libraries!"
+            echo "Attempting manual copy..."
+            # Manual fallback - copy all referenced libraries
+            otool -L ./Magick.app/Contents/MacOS/magick | grep "/opt/homebrew" | awk '{print $1}' | while read lib; do
+              if [ -f "$lib" ]; then
+                cp "$lib" ./Magick.app/Contents/libs/
+                echo "Copied: $(basename $lib)"
+              fi
+            done
+          fi
 
           # Verify all dependencies are bundled
           echo "Checking for external dependencies..."
@@ -101,7 +132,7 @@ jobs:
 
           # List bundled libraries
           echo "Bundled libraries:"
-          ls -la ./Magick.app/Contents/libs/
+          ls -lh ./Magick.app/Contents/libs/
 
       - name: Code sign the application (ad-hoc)
         run: |
@@ -110,13 +141,26 @@ jobs:
 
       - name: Create distributable archive
         run: |
+          # Verify libs were copied
+          echo "Contents of libs directory:"
+          ls -lh ./Magick.app/Contents/libs/ || echo "libs directory is empty or missing!"
+
+          # Count the number of dylib files
+          DYLIB_COUNT=$(find ./Magick.app/Contents/libs/ -name "*.dylib" | wc -l)
+          echo "Number of dylib files: $DYLIB_COUNT"
+
+          if [ "$DYLIB_COUNT" -eq 0 ]; then
+            echo "ERROR: No libraries were bundled!"
+            exit 1
+          fi
+
           # Create a zip of the app
           zip -r magick-macos.zip Magick.app
 
           # Also create a standalone binary archive
           mkdir -p magick-standalone
           cp ImageMagick-7.1.1/utilities/magick magick-standalone/
-          cp -R Magick.app/Contents/libs magick-standalone/
+          cp -R Magick.app/Contents/libs magick-standalone/ || echo "Warning: libs directory not copied"
           tar -czf magick-standalone.tar.gz magick-standalone
 
       - name: Get version info

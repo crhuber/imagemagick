@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-26
+    runs-on: macos-latest
 
     steps:
       - name: Checkout repository
@@ -78,6 +78,11 @@ jobs:
             -x ./Magick.app/Contents/MacOS/magick \
             -d ./Magick.app/Contents/libs/ \
             -p @executable_path/../libs/
+
+      - name: Code sign the application (ad-hoc)
+        run: |
+          # Ad-hoc signing to avoid Gatekeeper warnings
+          codesign --force --deep --sign - ./Magick.app
 
       - name: Create distributable archive
         run: |

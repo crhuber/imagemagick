@@ -1,0 +1,126 @@
+name: Build ImageMagick for macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew install cmake jpeg dylibbundler webp openexr little-cms2 pkg-config glib fontconfig ghostscript freetype gettext libzip libraqm libheif jbigkit pango libraw libwmf djvulibre pango librsvg
+
+      - name: Create symbolic links
+        run: |
+          sudo mkdir -p /usr/local/lib
+          cd /usr/local/lib
+          sudo ln -sf /opt/homebrew/lib/libjpeg.dylib .
+          sudo ln -sf /opt/homebrew/opt/liblqr/lib/liblqr-1.0.dylib .
+          cd /usr/local/
+          sudo ln -sf /opt/homebrew/Cellar/jpeg-xl/0.11.1_1/include/jxl .
+
+      - name: Clone ImageMagick
+        run: |
+          git clone https://github.com/ImageMagick/ImageMagick.git ImageMagick-7.1.1
+          cd ImageMagick-7.1.1
+
+      - name: Build ImageMagick
+        run: |
+          cd ImageMagick-7.1.1
+          make distclean || true
+          ./configure \
+            CC=clang \
+            CFLAGS="-O3" \
+            CXX=clang++ \
+            CXXFLAGS="-std=c++11 -O3 -march=native" \
+            LDFLAGS="-L/opt/homebrew/opt/jpeg/lib" \
+            CPPFLAGS="-I/opt/homebrew/opt/jpeg/include" \
+            --disable-dependency-tracking \
+            --without-x \
+            --without-magick-plus-plus \
+            --disable-shared \
+            --enable-static
+          make -j 8
+
+      - name: Create Magick.app framework
+        run: |
+          # Find a simple app to use as template (using Calculator as template)
+          cp -R /System/Applications/Calculator.app ./Magick.app
+
+          # Replace the executable
+          cp ImageMagick-7.1.1/utilities/magick ./Magick.app/Contents/MacOS/
+          rm -f ./Magick.app/Contents/MacOS/Calculator
+
+          # Update Info.plist to reference magick executable
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable magick" ./Magick.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName Magick" ./Magick.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.imagemagick.magick" ./Magick.app/Contents/Info.plist
+
+          # Remove irrelevant contents
+          rm -rf ./Magick.app/Contents/Resources/*
+          rm -rf ./Magick.app/Contents/PlugIns
+          rm -rf ./Magick.app/Contents/_CodeSignature
+
+      - name: Bundle libraries with dylibbundler
+        run: |
+          dylibbundler -od -of -b \
+            -x ./Magick.app/Contents/MacOS/magick \
+            -d ./Magick.app/Contents/libs/ \
+            -p @executable_path/../libs/
+
+      - name: Create distributable archive
+        run: |
+          # Create a zip of the app
+          zip -r magick-macos.zip Magick.app
+
+          # Also create a standalone binary archive
+          mkdir -p magick-standalone
+          cp ImageMagick-7.1.1/utilities/magick magick-standalone/
+          cp -R Magick.app/Contents/libs magick-standalone/
+          tar -czf magick-standalone.tar.gz magick-standalone
+
+      - name: Get version info
+        id: version
+        run: |
+          cd ImageMagick-7.1.1
+          VERSION=$(./utilities/magick --version | head -n1 | awk '{print $3}')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: ImageMagick ${{ steps.version.outputs.version }} for macOS
+          draft: false
+          prerelease: false
+
+      - name: Upload Magick.app to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./magick-macos.zip
+          asset_name: magick-macos.zip
+          asset_content_type: application/zip
+
+      - name: Upload standalone binary to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./magick-standalone.tar.gz
+          asset_name: magick-standalone.tar.gz
+          asset_content_type: application/gzip

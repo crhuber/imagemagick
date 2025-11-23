@@ -74,10 +74,25 @@ jobs:
 
       - name: Bundle libraries with dylibbundler
         run: |
+          # Run dylibbundler multiple times to catch all nested dependencies
           dylibbundler -od -of -b \
             -x ./Magick.app/Contents/MacOS/magick \
             -d ./Magick.app/Contents/libs/ \
             -p @executable_path/../libs/
+
+          # Run again to catch any missed dependencies
+          dylibbundler -od -of -b \
+            -x ./Magick.app/Contents/MacOS/magick \
+            -d ./Magick.app/Contents/libs/ \
+            -p @executable_path/../libs/
+
+          # Verify all dependencies are bundled
+          echo "Checking for external dependencies..."
+          otool -L ./Magick.app/Contents/MacOS/magick | grep -v "@executable_path" | grep -v "/usr/lib" | grep -v "/System" || true
+
+          # List bundled libraries
+          echo "Bundled libraries:"
+          ls -la ./Magick.app/Contents/libs/
 
       - name: Code sign the application (ad-hoc)
         run: |

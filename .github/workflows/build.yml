@@ -78,57 +78,107 @@ jobs:
           rm -rf ./Magick.app/Contents/PlugIns
           rm -rf ./Magick.app/Contents/_CodeSignature
 
-      - name: Bundle libraries with dylibbundler
+      - name: Bundle libraries manually
         run: |
           # Create libs directory
           mkdir -p ./Magick.app/Contents/libs/
 
-          echo "Running dylibbundler (pass 1)..."
-          # Run dylibbundler with create mode to actually copy files
-          dylibbundler -od -of -cd -b \
-            -x ./Magick.app/Contents/MacOS/magick \
-            -d ./Magick.app/Contents/libs/ \
-            -p @executable_path/../libs/ || echo "First pass had warnings"
+          echo "Manually bundling all dependencies..."
 
-          echo "Running dylibbundler (pass 2)..."
-          # Run again to catch any nested dependencies
-          dylibbundler -od -of -cd -b \
-            -x ./Magick.app/Contents/MacOS/magick \
-            -d ./Magick.app/Contents/libs/ \
-            -p @executable_path/../libs/ || echo "Second pass had warnings"
+          # Function to copy library and fix paths
+          copy_and_fix_lib() {
+            local lib_path="$1"
+            local lib_name=$(basename "$lib_path")
+            local dest="./Magick.app/Contents/libs/$lib_name"
 
-          echo "Running dylibbundler (pass 3)..."
-          # Third pass to be absolutely sure
-          dylibbundler -od -of -cd -b \
-            -x ./Magick.app/Contents/MacOS/magick \
-            -d ./Magick.app/Contents/libs/ \
-            -p @executable_path/../libs/ || echo "Third pass had warnings"
+            # Skip if already copied
+            if [ -f "$dest" ]; then
+              return
+            fi
 
-          # Check if any files were actually copied
-          echo "Checking libs directory..."
-          if [ ! -d "./Magick.app/Contents/libs/" ]; then
-            echo "ERROR: libs directory does not exist!"
+            # Resolve symlinks and copy the actual file
+            if [ -L "$lib_path" ]; then
+              local real_path=$(readlink "$lib_path")
+              if [[ "$real_path" != /* ]]; then
+                real_path="$(dirname "$lib_path")/$real_path"
+              fi
+              lib_path="$real_path"
+            fi
+
+            if [ -f "$lib_path" ]; then
+              cp "$lib_path" "$dest"
+              chmod +w "$dest"
+              echo "Copied: $lib_name"
+            fi
+          }
+
+          # Get all dependencies from the main binary
+          echo "Collecting dependencies from magick binary..."
+          otool -L ./Magick.app/Contents/MacOS/magick | grep "/opt/homebrew" | awk '{print $1}' | while read lib; do
+            copy_and_fix_lib "$lib"
+          done
+
+          # Recursively get dependencies of dependencies
+          echo "Collecting nested dependencies..."
+          for i in {1..5}; do
+            echo "Pass $i..."
+            for dylib in ./Magick.app/Contents/libs/*.dylib; do
+              if [ -f "$dylib" ]; then
+                otool -L "$dylib" | grep "/opt/homebrew" | awk '{print $1}' | while read lib; do
+                  copy_and_fix_lib "$lib"
+                done
+              fi
+            done
+          done
+
+          echo "Fixing library paths in main binary..."
+          # Fix paths in main binary
+          otool -L ./Magick.app/Contents/MacOS/magick | grep "/opt/homebrew" | awk '{print $1}' | while read lib; do
+            lib_name=$(basename "$lib")
+            install_name_tool -change "$lib" "@executable_path/../libs/$lib_name" ./Magick.app/Contents/MacOS/magick
+            echo "Fixed: $lib -> @executable_path/../libs/$lib_name"
+          done
+
+          echo "Fixing library paths in bundled libraries..."
+          # Fix paths in all bundled libraries
+          for dylib in ./Magick.app/Contents/libs/*.dylib; do
+            if [ -f "$dylib" ]; then
+              dylib_name=$(basename "$dylib")
+              # Fix the library's own ID
+              install_name_tool -id "@executable_path/../libs/$dylib_name" "$dylib"
+
+              # Fix references to other libraries
+              otool -L "$dylib" | grep "/opt/homebrew" | awk '{print $1}' | while read lib; do
+                lib_name=$(basename "$lib")
+                if [ -f "./Magick.app/Contents/libs/$lib_name" ]; then
+                  install_name_tool -change "$lib" "@executable_path/../libs/$lib_name" "$dylib"
+                fi
+              done
+            fi
+          done
+
+          # Count the number of dylib files
+          DYLIB_COUNT=$(find ./Magick.app/Contents/libs/ -name "*.dylib" | wc -l)
+          echo "Total libraries bundled: $DYLIB_COUNT"
+
+          if [ "$DYLIB_COUNT" -eq 0 ]; then
+            echo "ERROR: No libraries were bundled!"
             exit 1
           fi
 
-          DYLIB_COUNT=$(find ./Magick.app/Contents/libs/ -name "*.dylib" 2>/dev/null | wc -l)
-          echo "Found $DYLIB_COUNT dylib files"
+          # Verify all dependencies are now internal
+          echo "Verifying dependencies..."
+          echo "Main binary dependencies:"
+          otool -L ./Magick.app/Contents/MacOS/magick
 
-          if [ "$DYLIB_COUNT" -eq 0 ]; then
-            echo "ERROR: dylibbundler did not copy any libraries!"
-            echo "Attempting manual copy..."
-            # Manual fallback - copy all referenced libraries
-            otool -L ./Magick.app/Contents/MacOS/magick | grep "/opt/homebrew" | awk '{print $1}' | while read lib; do
-              if [ -f "$lib" ]; then
-                cp "$lib" ./Magick.app/Contents/libs/
-                echo "Copied: $(basename $lib)"
-              fi
-            done
+          echo "Checking for remaining external dependencies..."
+          EXTERNAL=$(otool -L ./Magick.app/Contents/MacOS/magick | grep -v "@executable_path" | grep -v "/usr/lib" | grep -v "/System" | grep -v ":" | wc -l)
+          if [ "$EXTERNAL" -gt 0 ]; then
+            echo "WARNING: Found $EXTERNAL external dependencies:"
+            otool -L ./Magick.app/Contents/MacOS/magick | grep -v "@executable_path" | grep -v "/usr/lib" | grep -v "/System"
+          else
+            echo "SUCCESS: All dependencies are bundled!"
           fi
-
-          # Verify all dependencies are bundled
-          echo "Checking for external dependencies..."
-          otool -L ./Magick.app/Contents/MacOS/magick | grep -v "@executable_path" | grep -v "/usr/lib" | grep -v "/System" || true
 
           # List bundled libraries
           echo "Bundled libraries:"
